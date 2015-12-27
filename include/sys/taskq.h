@@ -32,6 +32,7 @@
 #include <linux/kthread.h>
 #include <sys/types.h>
 #include <sys/thread.h>
+#include <sys/rwlock.h>
 
 #define TASKQ_NAMELEN		31
 
@@ -62,6 +63,7 @@ typedef struct taskq {
 	spinlock_t		tq_lock;       /* protects taskq_t */
 	unsigned long		tq_lock_flags; /* interrupt state */
 	char			*tq_name;      /* taskq name */
+	int			tq_instance;   /* instance of tq_name */
 	struct list_head	tq_thread_list;/* list of all threads */
 	struct list_head	tq_active_list;/* list of active threads */
 	int			tq_nactive;    /* # of active threads */
@@ -79,6 +81,7 @@ typedef struct taskq {
 	struct list_head	tq_pend_list;  /* pending task_t's */
 	struct list_head	tq_prio_list;  /* priority pending task_t's */
 	struct list_head	tq_delay_list; /* delayed task_t's */
+	struct list_head	tq_taskqs;     /* all taskq_t's */
 	wait_queue_head_t	tq_work_waitq; /* new work waitq */
 	wait_queue_head_t	tq_wait_waitq; /* wait waitq */
 } taskq_t;
@@ -110,6 +113,10 @@ typedef struct taskq_thread {
 
 /* Global system-wide dynamic task queue available for all consumers */
 extern taskq_t *system_taskq;
+
+/* List of all taskqs */
+extern struct list_head tq_list;
+extern struct rw_semaphore tq_list_sem;
 
 extern taskqid_t taskq_dispatch(taskq_t *, task_func_t, void *, uint_t);
 extern taskqid_t taskq_dispatch_delay(taskq_t *, task_func_t, void *,

@@ -54,6 +54,10 @@ EXPORT_SYMBOL(system_taskq);
 static taskq_t *dynamic_taskq;
 static taskq_thread_t *taskq_thread_create(taskq_t *);
 
+/* List of all taskqs */
+LIST_HEAD(tq_list);
+DECLARE_RWSEM(tq_list_sem);
+
 static int
 task_km_flags(uint_t flags)
 {
@@ -64,6 +68,23 @@ task_km_flags(uint_t flags)
 		return KM_PUSHPAGE;
 
 	return KM_SLEEP;
+}
+
+/*
+ * taskq_find_by_name - Find the largest instance number of a named taskq.
+ */
+static int
+taskq_find_by_name(const char *name)
+{
+	struct list_head *tql;
+	taskq_t *tq;
+
+	list_for_each_prev(tql, &tq_list) {
+		tq = list_entry(tql, taskq_t, tq_taskqs);
+		if (strcmp(name, tq->tq_name) == 0)
+			return tq->tq_instance;
+	}
+	return (-1);
 }
 
 /*
@@ -1002,6 +1023,7 @@ taskq_create(const char *name, int nthreads, pri_t pri,
 	INIT_LIST_HEAD(&tq->tq_delay_list);
 	init_waitqueue_head(&tq->tq_work_waitq);
 	init_waitqueue_head(&tq->tq_wait_waitq);
+	INIT_LIST_HEAD(&tq->tq_taskqs);
 
 	if (flags & TASKQ_PREPOPULATE) {
 		spin_lock_irqsave(&tq->tq_lock, tq->tq_lock_flags);
@@ -1029,6 +1051,11 @@ taskq_create(const char *name, int nthreads, pri_t pri,
 	if (rc) {
 		taskq_destroy(tq);
 		tq = NULL;
+	} else {
+		down_write(&tq_list_sem);
+		tq->tq_instance = taskq_find_by_name(name) + 1;
+		list_add_tail(&tq->tq_taskqs, &tq_list);
+		up_write(&tq_list_sem);
 	}
 
 	return (tq);
@@ -1055,6 +1082,11 @@ taskq_destroy(taskq_t *tq)
 		taskq_wait_outstanding(dynamic_taskq, 0);
 
 	taskq_wait(tq);
+
+	/* remove taskq from global list used by the kstats */
+	down_write(&tq_list_sem);
+	list_del(&tq->tq_taskqs);
+	up_write(&tq_list_sem);
 
 	spin_lock_irqsave(&tq->tq_lock, tq->tq_lock_flags);
 
