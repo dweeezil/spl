@@ -85,15 +85,24 @@ typedef struct {
 #endif
 
 static inline fstrans_cookie_t
-spl_fstrans_mark(void)
+spl_fstrans_set(int flag)
 {
 	fstrans_cookie_t cookie;
 
 	cookie.fstrans_thread = current;
 	cookie.saved_flags = current->flags & SPL_FSTRANS;
-	current->flags |= SPL_FSTRANS;
+	if (flag)
+		current->flags |= SPL_FSTRANS;
+	else
+		current->flags &= ~SPL_FSTRANS;
 
 	return (cookie);
+}
+
+static inline fstrans_cookie_t
+spl_fstrans_mark(void)
+{
+	return (spl_fstrans_set(1));
 }
 
 static inline void
