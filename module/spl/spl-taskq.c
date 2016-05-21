@@ -53,7 +53,7 @@ EXPORT_SYMBOL(system_taskq);
 
 /* Private dedicated taskq for creating new taskq threads on demand. */
 static taskq_t *dynamic_taskq;
-static taskq_thread_t *taskq_thread_create(taskq_t *);
+static taskq_thread_t *taskq_thread_create(taskq_t *, boolean_t);
 
 /* List of all taskqs */
 LIST_HEAD(tq_list);
@@ -763,11 +763,12 @@ taskq_thread_spawn_task(void *arg)
 	taskq_t *tq = (taskq_t *)arg;
 	unsigned long flags;
 
-	(void) taskq_thread_create(tq);
-
-	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
-	tq->tq_nspawn--;
-	spin_unlock_irqrestore(&tq->tq_lock, flags);
+	if (taskq_thread_create(tq, B_TRUE) == NULL) {
+		/* restore spawning count if failed */
+		spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+		tq->tq_nspawn--;
+		spin_unlock_irqrestore(&tq->tq_lock, flags);
+	}
 }
 
 /*
@@ -848,6 +849,9 @@ taskq_thread(void *args)
 
 	tsd_set(taskq_tsd, tq);
 	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	/* we are dynamically spawned, decrease spawning count */
+	if (tqt->tqt_is_dynamic)
+		tq->tq_nspawn--;
 
 	/* Immediately exit if more threads than allowed were created. */
 	if (tq->tq_nthreads >= tq->tq_maxthreads)
@@ -957,7 +961,7 @@ error:
 }
 
 static taskq_thread_t *
-taskq_thread_create(taskq_t *tq)
+taskq_thread_create(taskq_t *tq, boolean_t dynamic)
 {
 	static int last_used_cpu = 0;
 	taskq_thread_t *tqt;
@@ -967,6 +971,7 @@ taskq_thread_create(taskq_t *tq)
 	INIT_LIST_HEAD(&tqt->tqt_active_list);
 	tqt->tqt_tq = tq;
 	tqt->tqt_id = 0;
+	tqt->tqt_is_dynamic = dynamic;
 
 	tqt->tqt_thread = spl_kthread_create(taskq_thread, tqt,
 	    "%s", tq->tq_name);
@@ -1054,7 +1059,7 @@ taskq_create(const char *name, int nthreads, pri_t pri,
 		nthreads = 1;
 
 	for (i = 0; i < nthreads; i++) {
-		tqt = taskq_thread_create(tq);
+		tqt = taskq_thread_create(tq, B_FALSE);
 		if (tqt == NULL)
 			rc = 1;
 		else
@@ -1106,6 +1111,12 @@ taskq_destroy(taskq_t *tq)
 	up_write(&tq_list_sem);
 
 	spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	/* wait for spawning threads to insert themselves to the list */
+	while (tq->tq_nspawn) {
+		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		schedule_timeout_interruptible(1);
+		spin_lock_irqsave_nested(&tq->tq_lock, flags, tq->tq_lock_class);
+	}
 
 	/*
 	 * Signal each thread to exit and block until it does.  Each thread
